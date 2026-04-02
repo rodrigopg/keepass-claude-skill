@@ -178,9 +178,9 @@ run_on_db() {
   # Executar
   local result exit_code
   if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
-    result=$(echo "$pass" | "$KEEPASSXC" $op -q -k "$keyfile" "$path" $args 2>&1)
+    result=$(printf '%s' "$pass" | "$KEEPASSXC" $op -q -k "$keyfile" "$path" $args 2>&1)
   else
-    result=$(echo "$pass" | "$KEEPASSXC" $op -q "$path" $args 2>&1)
+    result=$(printf '%s' "$pass" | "$KEEPASSXC" $op -q "$path" $args 2>&1)
   fi
   exit_code=$?
 
@@ -230,19 +230,19 @@ fi
 ### `list`
 
 ```bash
-echo "$pass" | "$KEEPASSXC" ls -q -R -f "$path"
+printf '%s' "$pass" | "$KEEPASSXC" ls -q -R -f "$path"
 ```
 
 ### `search <termo>`
 
 ```bash
-echo "$pass" | "$KEEPASSXC" search -q "$path" "termo"
+printf '%s' "$pass" | "$KEEPASSXC" search -q "$path" "termo"
 ```
 
 ### `show "<entrada>"`
 
 ```bash
-echo "$pass" | "$KEEPASSXC" show -q -s --all "$path" "Grupo/Entrada"
+printf '%s' "$pass" | "$KEEPASSXC" show -q -s --all "$path" "Grupo/Entrada"
 ```
 
 ⚠️ Exibe senha em texto claro. Avisar o usuário antes de executar.
@@ -253,10 +253,10 @@ echo "$pass" | "$KEEPASSXC" show -q -s --all "$path" "Grupo/Entrada"
 
 ```bash
 # Com senha gerada (recomendado)
-echo "$pass" | "$KEEPASSXC" add -q -g -L 24 -l -U -n -s "$path" "Grupo/Entrada"
+printf '%s' "$pass" | "$KEEPASSXC" add -q -g -L 24 -l -U -n -s "$path" "Grupo/Entrada"
 
 # Com username e URL
-echo "$pass" | "$KEEPASSXC" add -q -g -L 24 -l -U -n -s \
+printf '%s' "$pass" | "$KEEPASSXC" add -q -g -L 24 -l -U -n -s \
   -u "usuario" --url "https://exemplo.com" "$path" "Grupo/Entrada"
 ```
 
@@ -268,10 +268,10 @@ Flags de geração de senha: `-g` gerar | `-L 24` comprimento | `-l` lowercase |
 
 ```bash
 # Editar campos
-echo "$pass" | "$KEEPASSXC" edit -q -u "novo_usuario" --url "https://novo.com" "$path" "Grupo/Entrada"
+printf '%s' "$pass" | "$KEEPASSXC" edit -q -u "novo_usuario" --url "https://novo.com" "$path" "Grupo/Entrada"
 
 # Gerar nova senha
-echo "$pass" | "$KEEPASSXC" edit -q -g -L 24 -l -U -n -s "$path" "Grupo/Entrada"
+printf '%s' "$pass" | "$KEEPASSXC" edit -q -g -L 24 -l -U -n -s "$path" "Grupo/Entrada"
 ```
 
 ### `rm "<entrada>"`
@@ -279,7 +279,7 @@ echo "$pass" | "$KEEPASSXC" edit -q -g -L 24 -l -U -n -s "$path" "Grupo/Entrada"
 **Verificar KeePassXC fechado. SEMPRE pedir confirmação explícita antes de executar.**
 
 ```bash
-echo "$pass" | "$KEEPASSXC" rm -q "$path" "Grupo/Entrada"
+printf '%s' "$pass" | "$KEEPASSXC" rm -q "$path" "Grupo/Entrada"
 ```
 
 Move para Lixeira. Para deletar permanentemente, executar `rm` novamente dentro de `Recycle Bin/`.
