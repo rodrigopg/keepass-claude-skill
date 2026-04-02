@@ -28,6 +28,7 @@ Execute operações com: `/keepass <operação> [argumentos] [--db <alias>]`
 | `add "<grupo/entrada>" [--db <alias>]` | Adicionar nova entrada com senha gerada |
 | `edit "<grupo/entrada>" [--db <alias>]` | Editar entrada existente |
 | `rm "<grupo/entrada>" [--db <alias>]` | Mover entrada para Lixeira |
+| `totp "<grupo/entrada>" [--db <alias>]` | Gerar código TOTP (2FA) atual da entrada |
 | `generate` | Gerar senha aleatória (sem salvar) |
 | `db-info [--db <alias>]` | Informações do banco |
 | `list-dbs` | Listar todas as databases configuradas |
@@ -149,7 +150,7 @@ get_db_info() {
 ```bash
 run_on_db() {
   local db_info="$1"
-  local op="$2"      # ls, search, show, add, edit, rm, db-info
+  local op="$2"      # ls, search, show, add, edit, rm, totp, db-info
   local args="$3"    # argumentos adicionais
 
   local alias path keychain_service keychain_account keyfile
@@ -283,6 +284,14 @@ printf '%s' "$pass" | "$KEEPASSXC" rm -q "$path" "Grupo/Entrada"
 ```
 
 Move para Lixeira. Para deletar permanentemente, executar `rm` novamente dentro de `Recycle Bin/`.
+
+### `totp "<entrada>"`
+
+```bash
+printf '%s' "$pass" | "$KEEPASSXC" totp -q "$path" "Grupo/Entrada"
+```
+
+Gera o código TOTP atual (6 dígitos, válido por 30s). A entrada precisa ter TOTP configurado no KeePassXC.
 
 ### `generate`
 
