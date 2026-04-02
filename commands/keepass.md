@@ -288,10 +288,11 @@ Move para Lixeira. Para deletar permanentemente, executar `rm` novamente dentro 
 ### `totp "<entrada>"`
 
 ```bash
-printf '%s' "$pass" | "$KEEPASSXC" totp -q "$path" "Grupo/Entrada"
+printf '%s' "$pass" | "$KEEPASSXC" show -q --totp "$path" "Grupo/Entrada"
 ```
 
 Gera o código TOTP atual (6 dígitos, válido por 30s). A entrada precisa ter TOTP configurado no KeePassXC.
+Compatível com keepassxc-cli v2.7.x+. O subcomando `totp` só existe na v2.8+.
 
 ### `generate`
 
