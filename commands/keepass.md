@@ -12,6 +12,20 @@ Manipula entradas em múltiplos bancos de dados KeePass usando `keepassxc-cli`.
 A lista de bancos disponíveis é lida de `~/.claude/keepass-config.json`.
 Para configurar pela primeira vez, use `/keepass-setup`.
 
+---
+
+## PROIBIÇÕES ABSOLUTAS — Jamais faça isso
+
+❌ **NUNCA usar `export`** — exporta TODAS as senhas em texto puro. Proibido sem exceção.
+❌ **NUNCA hardcodar senha** — nem "master", nem qualquer outra. Se Keychain falhar, parar e reportar.
+❌ **NUNCA usar `find` para localizar arquivos `.kdbx`** — se o arquivo não existir no caminho do config, reportar e parar.
+❌ **NUNCA sobrescrever senha no Keychain automaticamente** — nunca executar `security add/delete-generic-password` sem pedido explícito do usuário.
+❌ **NUNCA tentar mais de 1 vez a mesma operação** — se falhar, reportar o erro exato e parar.
+❌ **NUNCA adivinhar caminho de entrada** — sempre fazer `search` primeiro para obter o caminho exato.
+❌ **NUNCA usar `echo "$pass"` com pipe** — usar sempre `printf '%s\n' "$pass"` para consistência.
+
+---
+
 ## Como Usar
 
 Execute operações com: `/keepass <operação> [argumentos] [--db <alias>]`
@@ -24,14 +38,25 @@ Execute operações com: `/keepass <operação> [argumentos] [--db <alias>]`
 |----------|-----------|
 | `list [--db <alias>]` | Listar todas as entradas |
 | `search <termo> [--db <alias>]` | Buscar por nome, username, URL ou notas |
-| `show "<grupo/entrada>" [--db <alias>]` | Exibir detalhes (inclui senha em texto claro) |
+| `show "<grupo/entrada>" [--db <alias>]` | Exibir detalhes — SEMPRE fazer `search` antes |
 | `add "<grupo/entrada>" [--db <alias>]` | Adicionar nova entrada com senha gerada |
 | `edit "<grupo/entrada>" [--db <alias>]` | Editar entrada existente |
-| `rm "<grupo/entrada>" [--db <alias>]` | Mover entrada para Lixeira |
+| `rm "<grupo/entrada>" [--db <alias>]` | Mover entrada para Lixeira — pede confirmação |
 | `totp "<grupo/entrada>" [--db <alias>]` | Gerar código TOTP (2FA) atual da entrada |
 | `generate` | Gerar senha aleatória (sem salvar) |
 | `db-info [--db <alias>]` | Informações do banco |
 | `list-dbs` | Listar todas as databases configuradas |
+
+### Fluxo obrigatório para `show`
+
+```
+1. Executar: search <termo>
+2. Apresentar os resultados ao usuário
+3. Usar o caminho EXATO retornado pelo search para executar o show
+4. Nunca construir ou adivinhar o caminho — usar apenas o que o search retornou
+```
+
+---
 
 ## Implementação
 
@@ -69,7 +94,8 @@ find_keepassxc_cli() {
   fi
   case "$(detect_os)" in
     macos)
-      for p in /opt/homebrew/bin/keepassxc-cli /usr/local/bin/keepassxc-cli; do
+      for p in /opt/homebrew/bin/keepassxc-cli /usr/local/bin/keepassxc-cli \
+                /Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli; do
         [ -x "$p" ] && echo "$p" && return
       done ;;
     linux)
@@ -85,16 +111,16 @@ check_desktop_running() {
   pgrep -x "KeePassXC" > /dev/null 2>&1
 }
 
-# Imprime comando para armazenar senha no secret store do OS
-store_password_instruction() {
-  local service="$1" account="$2"
-  case "$(detect_os)" in
-    macos) echo "security add-generic-password -s \"$service\" -a \"$account\" -w" ;;
-    linux) echo "secret-tool store --label=\"$account\" service \"$service\" account \"$account\"" ;;
-  esac
-}
-
 # ── Validações ────────────────────────────────────────────────────────────────
+
+# jq instalado?
+if ! command -v jq &>/dev/null; then
+  case "$(detect_os)" in
+    macos) echo "❌ jq não encontrado. Instale com: brew install jq" ;;
+    linux) echo "❌ jq não encontrado. Instale com: sudo apt install jq" ;;
+  esac
+  exit 1
+fi
 
 # keepassxc-cli instalado?
 KEEPASSXC=$(find_keepassxc_cli)
@@ -112,15 +138,6 @@ if [ ! -f "$CONFIG" ]; then
   echo "   Execute /keepass-setup para configurar seus bancos."
   exit 1
 fi
-
-# Para operações de ESCRITA (add/edit/rm): KeePassXC desktop deve estar fechado
-check_no_desktop() {
-  if check_desktop_running; then
-    echo "⚠️  KeePassXC desktop está aberto."
-    echo "   Feche o app antes de operações de escrita para evitar conflitos."
-    return 1
-  fi
-}
 ```
 
 ### Passo 1: Resolver aliases
@@ -131,14 +148,14 @@ get_all_aliases() {
   jq -r '.databases[].alias' "$CONFIG"
 }
 
-# Obter info de um banco pelo alias
+# Obter info de um banco pelo alias (usa --arg para evitar injeção por alias com aspas)
 get_db_info() {
   local alias="$1"
   local info
-  info=$(jq ".databases[] | select(.alias == \"$alias\")" "$CONFIG")
+  info=$(jq --arg alias "$alias" '.databases[] | select(.alias == $alias)' "$CONFIG")
   if [ -z "$info" ]; then
     echo "❌ Alias '$alias' não encontrado. Aliases disponíveis:"
-    jq -r '.databases[] | "  • \(.alias) — \(.description)"' "$CONFIG"
+    jq -r '.databases[] | "  • \(.alias)"' "$CONFIG"
     return 1
   fi
   echo "$info"
@@ -151,7 +168,7 @@ get_db_info() {
 run_on_db() {
   local db_info="$1"
   local op="$2"      # ls, search, show, add, edit, rm, totp, db-info
-  local args="$3"    # argumentos adicionais
+  local args="$3"    # argumentos adicionais (string, expandida pelo chamador)
 
   local alias path keychain_service keychain_account keyfile
   alias=$(echo "$db_info" | jq -r '.alias')
@@ -160,43 +177,57 @@ run_on_db() {
   keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
   keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
 
-  # Arquivo existe?
+  # Para operações de ESCRITA: KeePassXC desktop deve estar fechado
+  if [[ "$op" =~ ^(add|edit|rm)$ ]]; then
+    if check_desktop_running; then
+      echo "❌ [$alias] KeePassXC desktop está aberto."
+      echo "   Feche o app antes de operações de escrita para evitar conflitos de lock."
+      return 1
+    fi
+  fi
+
+  # Arquivo existe? Parar imediatamente — não buscar alternativas.
   if [ ! -f "$path" ]; then
-    echo "⚠️  [$alias] Arquivo não encontrado: $path"
+    echo "❌ [$alias] Arquivo não encontrado: $path"
     echo "   Verifique se o armazenamento em nuvem está sincronizado."
+    echo "   Se o caminho mudou, atualize ~/.claude/keepass-config.json manualmente."
     return 1
   fi
 
-  # Recuperar senha do Keychain
+  # Recuperar senha do Keychain — se falhar, parar imediatamente
   local pass
   pass=$(get_password "$keychain_service" "$keychain_account")
   if [ -z "$pass" ]; then
     echo "❌ [$alias] Senha não encontrada no Keychain para '$keychain_account'"
-    echo "   Execute: security add-generic-password -s \"$keychain_service\" -a \"$keychain_account\" -w"
+    echo "   Para corrigir, execute manualmente no terminal:"
+    echo "   security add-generic-password -s \"$keychain_service\" -a \"$keychain_account\" -w"
+    echo "   (nunca executar automaticamente — requer a senha master digitada pelo usuário)"
     return 1
   fi
 
-  # Executar
+  # Executar — usar printf '%s\n' para evitar interpretação de flags
   local result exit_code
   if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
-    result=$(printf '%s' "$pass" | "$KEEPASSXC" $op -q -k "$keyfile" "$path" $args 2>&1)
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" "$op" -q -k "$keyfile" "$path" $args 2>&1)
   else
-    result=$(printf '%s' "$pass" | "$KEEPASSXC" $op -q "$path" $args 2>&1)
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" "$op" -q "$path" $args 2>&1)
   fi
   exit_code=$?
 
-  # Tratar erros conhecidos
+  # Tratar erros conhecidos — reportar e parar, sem retentativas
   if [ $exit_code -ne 0 ]; then
     if echo "$result" | grep -qi "already locked\|in use\|locked by"; then
       echo "❌ [$alias] Database bloqueada por outro processo. Feche o KeePassXC desktop."
-    elif echo "$result" | grep -qi "invalid credentials\|wrong key\|password"; then
-      echo "❌ [$alias] Senha master incorreta no Keychain."
-      echo "   Atualize: security delete-generic-password -s \"$keychain_service\" -a \"$keychain_account\""
-      echo "   Depois:   security add-generic-password -s \"$keychain_service\" -a \"$keychain_account\" -w"
-    elif echo "$result" | grep -qi "entry.*not found\|no entry"; then
-      : # saída vazia é normal para "não encontrado" — não mostrar erro
+    elif echo "$result" | grep -qi "invalid credentials\|wrong key\|Invalid key\|error.*password\|Error while reading"; then
+      echo "❌ [$alias] Senha master incorreta no Keychain para '$keychain_account'."
+      echo "   Para corrigir manualmente (execute você mesmo no terminal):"
+      echo "   1. security delete-generic-password -s \"$keychain_service\" -a \"$keychain_account\""
+      echo "   2. security add-generic-password -s \"$keychain_service\" -a \"$keychain_account\" -w"
+    elif echo "$result" | grep -qi "entry.*not found\|no entry\|Could not find"; then
+      echo "⚠️  [$alias] Entrada não encontrada."
+      echo "   Use 'search <termo>' para localizar o caminho exato da entrada."
     else
-      echo "❌ [$alias] $result"
+      echo "❌ [$alias] Erro (exit $exit_code): $result"
     fi
     return $exit_code
   fi
@@ -231,56 +262,66 @@ fi
 ### `list`
 
 ```bash
-printf '%s' "$pass" | "$KEEPASSXC" ls -q -R -f "$path"
+printf '%s\n' "$pass" | "$KEEPASSXC" ls -q -R -f "$path"
 ```
 
 ### `search <termo>`
 
 ```bash
-printf '%s' "$pass" | "$KEEPASSXC" search -q "$path" "termo"
+printf '%s\n' "$pass" | "$KEEPASSXC" search -q "$path" "termo"
 ```
 
-### `show "<entrada>"`
+Retorna caminhos exatos das entradas. **Use esses caminhos para `show`.**
+
+### `show "<entrada>"` — SEMPRE fazer `search` antes
 
 ```bash
-printf '%s' "$pass" | "$KEEPASSXC" show -q -s --all "$path" "Grupo/Entrada"
+# PASSO 1: buscar para obter o caminho exato
+printf '%s\n' "$pass" | "$KEEPASSXC" search -q "$path" "termo"
+
+# PASSO 2: usar o caminho EXATO retornado pelo search (copiar sem modificar)
+printf '%s\n' "$pass" | "$KEEPASSXC" show -q -s --all "$path" "Grupo/Entrada/Exata"
 ```
 
 ⚠️ Exibe senha em texto claro. Avisar o usuário antes de executar.
+⚠️ Se o usuário não forneceu o caminho exato, executar search e perguntar qual entrada mostrar.
 
 ### `add "<entrada>"`
 
-**Verificar KeePassXC desktop fechado antes.**
+KeePassXC desktop deve estar fechado (verificado automaticamente em `run_on_db`).
 
 ```bash
 # Com senha gerada (recomendado)
-printf '%s' "$pass" | "$KEEPASSXC" add -q -g -L 24 -l -U -n -s "$path" "Grupo/Entrada"
+printf '%s\n' "$pass" | "$KEEPASSXC" add -q -g -L 24 -l -U -n -s "$path" "Grupo/Entrada"
 
 # Com username e URL
-printf '%s' "$pass" | "$KEEPASSXC" add -q -g -L 24 -l -U -n -s \
+printf '%s\n' "$pass" | "$KEEPASSXC" add -q -g -L 24 -l -U -n -s \
   -u "usuario" --url "https://exemplo.com" "$path" "Grupo/Entrada"
 ```
 
-Flags de geração de senha: `-g` gerar | `-L 24` comprimento | `-l` lowercase | `-U` uppercase | `-n` números | `-s` símbolos
+Flags: `-g` gerar senha | `-L 24` comprimento | `-l` lowercase | `-U` uppercase | `-n` números | `-s` símbolos
 
 ### `edit "<entrada>"`
 
-**Verificar KeePassXC desktop fechado antes.**
+KeePassXC desktop deve estar fechado (verificado automaticamente em `run_on_db`).
 
 ```bash
-# Editar campos
-printf '%s' "$pass" | "$KEEPASSXC" edit -q -u "novo_usuario" --url "https://novo.com" "$path" "Grupo/Entrada"
+printf '%s\n' "$pass" | "$KEEPASSXC" edit -q -u "novo_usuario" --url "https://novo.com" "$path" "Grupo/Entrada"
 
 # Gerar nova senha
-printf '%s' "$pass" | "$KEEPASSXC" edit -q -g -L 24 -l -U -n -s "$path" "Grupo/Entrada"
+printf '%s\n' "$pass" | "$KEEPASSXC" edit -q -g -L 24 -l -U -n -s "$path" "Grupo/Entrada"
 ```
 
-### `rm "<entrada>"`
+### `rm "<entrada>"` — SEMPRE pedir confirmação
 
-**Verificar KeePassXC fechado. SEMPRE pedir confirmação explícita antes de executar.**
+**Antes de executar, perguntar ao usuário:**
+```
+Confirma exclusão de '<entrada>' no banco '<alias>'? (s/n)
+```
+Só prosseguir se a resposta for "s" ou "sim". Se não, abortar.
 
 ```bash
-printf '%s' "$pass" | "$KEEPASSXC" rm -q "$path" "Grupo/Entrada"
+printf '%s\n' "$pass" | "$KEEPASSXC" rm -q "$path" "Grupo/Entrada"
 ```
 
 Move para Lixeira. Para deletar permanentemente, executar `rm` novamente dentro de `Recycle Bin/`.
@@ -288,10 +329,10 @@ Move para Lixeira. Para deletar permanentemente, executar `rm` novamente dentro 
 ### `totp "<entrada>"`
 
 ```bash
-printf '%s' "$pass" | "$KEEPASSXC" show -q --totp "$path" "Grupo/Entrada"
+printf '%s\n' "$pass" | "$KEEPASSXC" show -q --totp "$path" "Grupo/Entrada"
 ```
 
-Gera o código TOTP atual (6 dígitos, válido por 30s). A entrada precisa ter TOTP configurado no KeePassXC.
+Gera o código TOTP atual (6 dígitos, válido por ~30s). A entrada precisa ter TOTP configurado.
 Compatível com keepassxc-cli v2.7.x+. O subcomando `totp` só existe na v2.8+.
 
 ### `generate`
@@ -303,39 +344,46 @@ Compatível com keepassxc-cli v2.7.x+. O subcomando `totp` só existe na v2.8+.
 ### `list-dbs`
 
 ```bash
-jq -r '.databases[] | "[\(.alias)] \(.description) — \(.path)"' "$CONFIG"
+jq -r '.databases[] | "[\(.alias)] — \(.path)"' "$CONFIG"
+```
+
+### `db-info`
+
+```bash
+printf '%s\n' "$pass" | "$KEEPASSXC" db-info -q "$path"
 ```
 
 ---
 
 ## Regras de Segurança
 
-1. **Nunca expor a senha master** — sempre via stdin pipe; jamais em argumento CLI ou echo visível
-2. **Confirmar antes de `rm`** — perguntar: "Confirma exclusão de 'X'? (s/n)"
-3. **Verificar KeePassXC fechado** antes de `add`/`edit`/`rm` — `pgrep -x KeePassXC`
-4. **Validar `$pass` não-vazio** antes do pipe — erro claro se Keychain falhou
-5. **Validar arquivo existe** — `test -f "$path"` antes de qualquer operação
-6. **Usar aspas duplas** — caminhos têm espaços; sempre `"$path"`, nunca `$path`
-7. **Avisar sobre texto claro** — ao usar `show`, mencionar que senha ficará visível
-8. **Aguardar sync** — após writes, informar que armazenamento em nuvem pode levar alguns segundos
+1. **Nunca expor a senha master** — sempre via `printf '%s\n' "$pass" | ...`; jamais em argumento CLI
+2. **Nunca usar `export`** — expõe TODAS as senhas em texto puro; proibição absoluta
+3. **Confirmar antes de `rm`** — perguntar ao usuário; só executar com confirmação explícita
+4. **Verificar KeePassXC fechado** antes de `add`/`edit`/`rm` (integrado em `run_on_db`)
+5. **Parar na primeira falha** — não tentar variações; reportar o erro exato
+6. **Nunca corrigir Keychain automaticamente** — apenas instruir o usuário com os comandos
+7. **Usar aspas duplas** — caminhos têm espaços; sempre `"$path"`, nunca `$path`
+8. **Avisar sobre texto claro** — ao usar `show`, mencionar que senha ficará visível
+9. **Search antes de show** — nunca construir caminhos; usar apenas o que o search retornar
 
 ## Diagnóstico
 
 ```bash
+# jq instalado?
+command -v jq && echo "✓" || echo "✗ brew install jq"
+
 # keepassxc-cli instalado?
-find_keepassxc_cli && echo "✓ encontrado" || echo "✗ não encontrado"
+keepassxc=$(find_keepassxc_cli); [ -n "$keepassxc" ] && echo "✓ $keepassxc" || echo "✗ não encontrado"
 
 # KeePassXC desktop aberto? (deve estar fechado para writes)
-check_desktop_running && echo "⚠️ Aberto" || echo "✓ Fechado"
+pgrep -x KeePassXC && echo "⚠️ Aberto" || echo "✓ Fechado"
 
 # JSON válido?
 jq . ~/.claude/keepass-config.json
 
-# Keychain/secret-tool configurado para um banco?
-# macOS:
+# Keychain configurado para um banco? (macOS)
 security find-generic-password -s "keepassxc-cli" -a "KEYCHAIN_ACCOUNT" -w 2>&1 | head -c 3 | xxd
-# Linux/WSL:
-secret-tool lookup service "keepassxc-cli" account "KEYCHAIN_ACCOUNT"
 
 # Arquivo .kdbx acessível?
 test -f "CAMINHO" && echo "✓" || echo "✗ (nuvem sincronizada?)"

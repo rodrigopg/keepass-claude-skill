@@ -14,6 +14,20 @@ Auto-loaded quando o usuário menciona passwords, credentials, logins, ou KeePas
 
 Suporta **N databases** configuradas em `~/.claude/keepass-config.json`, com autenticação via macOS Keychain e suporte a arquivos `.keyx`. Pesquisa global em todas as databases por padrão.
 
+---
+
+## PROIBIÇÕES ABSOLUTAS — Jamais faça isso
+
+❌ **NUNCA usar `export`** — exporta TODAS as senhas em texto puro. Proibido sem exceção.
+❌ **NUNCA hardcodar senha** — nem "master", nem qualquer outra. Se Keychain falhar, parar e reportar.
+❌ **NUNCA usar `find` para localizar arquivos `.kdbx`** — se o arquivo não existir no caminho do config, reportar e parar.
+❌ **NUNCA sobrescrever senha no Keychain automaticamente** — nunca executar `security add/delete-generic-password` sem pedido explícito do usuário.
+❌ **NUNCA tentar mais de 1 vez a mesma operação** — se falhar, reportar o erro exato e parar.
+❌ **NUNCA adivinhar caminho de entrada** — sempre fazer `search` primeiro para obter o caminho exato.
+❌ **NUNCA usar `echo "$pass"` com pipe** — usar sempre `printf '%s\n' "$pass"`.
+
+---
+
 ## Plataformas Suportadas
 
 | OS | Suporte | Secret Store | Requisito |
@@ -67,20 +81,30 @@ CONFIG="$HOME/.claude/keepass-config.json"
 KEEPASSXC=$(find_keepassxc_cli)
 
 for alias in $(jq -r '.databases[].alias' "$CONFIG"); do
-  db_info=$(jq ".databases[] | select(.alias == \"$alias\")" "$CONFIG")
+  db_info=$(jq --arg alias "$alias" '.databases[] | select(.alias == $alias)' "$CONFIG")
   path=$(echo "$db_info" | jq -r '.path')
   account=$(echo "$db_info" | jq -r '.keychain_account')
   service=$(echo "$db_info" | jq -r '.keychain_service')
   keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
 
+  # Se arquivo não existir, reportar e continuar para próximo banco
+  if [ ! -f "$path" ]; then
+    echo "❌ [$alias] Arquivo não encontrado: $path"
+    continue
+  fi
+
   # get_password abstrai Keychain (macOS) vs secret-tool (Linux/WSL)
   pass=$(get_password "$service" "$account")
-  [ -z "$pass" ] && echo "❌ [$alias] Senha não encontrada no secret store" && continue
+  if [ -z "$pass" ]; then
+    echo "❌ [$alias] Senha não encontrada no Keychain para '$account'"
+    echo "   Execute manualmente: security add-generic-password -s \"$service\" -a \"$account\" -w"
+    continue
+  fi
 
   if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
-    result=$(echo "$pass" | "$KEEPASSXC" search -q -k "$keyfile" "$path" "TERMO" 2>&1)
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" search -q -k "$keyfile" "$path" "TERMO" 2>&1)
   else
-    result=$(echo "$pass" | "$KEEPASSXC" search -q "$path" "TERMO" 2>&1)
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" search -q "$path" "TERMO" 2>&1)
   fi
 
   [ -n "$result" ] && echo "$result" | sed "s/^/[$alias] /"
@@ -92,29 +116,38 @@ done
 Se usuário especificar `--db <alias>`:
 
 ```bash
-db_info=$(jq ".databases[] | select(.alias == \"$alias\")" "$CONFIG")
+db_info=$(jq --arg alias "$alias" '.databases[] | select(.alias == $alias)' "$CONFIG")
 # ... processar apenas esse banco
+```
+
+### Fluxo obrigatório para `show`
+
+```
+1. Executar: search <termo>
+2. Apresentar os resultados ao usuário
+3. Usar o caminho EXATO retornado pelo search para executar o show
+4. Nunca construir ou adivinhar o caminho
 ```
 
 ## Padrões de Segurança
 
-1. ✅ Sempre passar senha via **stdin pipe** — nunca expor na CLI, logs ou variáveis visíveis
-2. ✅ Suportar arquivos `.keyx` com flag `-k` quando configurado
-3. ✅ **Confirmar antes de `rm`** — perguntar explicitamente: "Confirma exclusão de 'X'? (s/n)"
+1. ✅ Sempre passar senha via `printf '%s\n' "$pass" | ...` — nunca expor na CLI
+2. ✅ **Nunca usar `export`** — expõe TODAS as senhas em texto puro
+3. ✅ **Confirmar antes de `rm`** — perguntar: "Confirma exclusão de 'X'? (s/n)"
 4. ✅ **Verificar KeePassXC fechado** antes de writes: `pgrep -x KeePassXC`
-5. ✅ **Validar `$pass` não-vazio** antes do pipe — erro claro se Keychain falhou
-6. ✅ **Validar arquivo `.kdbx` existe** — `test -f "$path"` antes de qualquer op
+5. ✅ **Parar na primeira falha** — não tentar variações; reportar o erro exato
+6. ✅ **Validar arquivo `.kdbx` existe** — `test -f "$path"` antes de qualquer op; não usar `find`
 7. ✅ **Avisar sobre texto claro** — `show` exibe senha sem encriptação
-8. ✅ **Usar aspas duplas** — caminhos têm espaços; nunca `$path` sem aspas
+8. ✅ **Nunca corrigir Keychain automaticamente** — apenas instruir o usuário
 
 ## Tratamento de Erros Comuns
 
 | Erro | Causa | OS | Ação |
 |------|-------|----|------|
-| `already locked` / `in use` | KeePassXC desktop aberto | Todos | Fechar app antes de writes |
-| `Invalid credentials` / `Wrong key` | Senha master errada no secret store | Todos | Deletar e re-adicionar senha |
-| Arquivo não encontrado | Nuvem não sincronizada | Todos | Aguardar sync ou abrir app de nuvem |
-| Saída vazia | Nenhuma entrada encontrada | Todos | Normal — informar ao usuário |
+| `already locked` / `in use` | KeePassXC desktop aberto | Todos | Fechar app antes de writes — **parar e reportar** |
+| `Invalid credentials` / `Wrong key` | Senha master errada no secret store | Todos | **Parar e instruir** o usuário a corrigir manualmente |
+| Arquivo não encontrado | Nuvem não sincronizada ou caminho errado | Todos | **Parar e reportar** — não usar `find` para buscar alternativas |
+| Saída vazia | Nenhuma entrada encontrada | Todos | Normal — informar ao usuário; oferecer `search` |
 | `jq: command not found` | `jq` não instalado | Todos | macOS: `brew install jq` / Linux: `sudo apt install jq` |
 | `keepassxc-cli: command not found` | App não instalado | Todos | macOS: `brew install keepassxc` / Linux: `sudo apt install keepassxc` |
 | `secret-tool: command not found` | libsecret não instalado | Linux/WSL | `sudo apt install libsecret-tools` |
@@ -141,9 +174,10 @@ Usuário: "qual a senha do GitHub?"
 Claude:
 1. Skill detecta pergunta sobre credencial
 2. Lê lista de databases do config
-3. Busca globalmente em todas as databases
+3. Executa search globalmente em todas as databases
 4. Retorna resultado com username/URL (sem exibir senha)
 5. Oferece: "Execute /keepass show 'Grupo/GitHub' para ver a senha"
+   (usando o caminho EXATO retornado pelo search)
 ```
 
 ### Comando Explícito
@@ -151,7 +185,7 @@ Claude:
 ```
 /keepass search github              # busca em TODAS as databases
 /keepass search github --db pessoal # busca apenas em 'pessoal'
-/keepass show "Grupo/Entrada"       # exibe detalhes (senha visível)
+/keepass show "Grupo/Entrada"       # exibe detalhes (senha visível) — usar caminho do search
 /keepass list --db trabalho         # lista entradas de um banco específico
 /keepass add "Dev/nova-api" --db trabalho
 /keepass list-dbs                   # mostra todos os bancos configurados
