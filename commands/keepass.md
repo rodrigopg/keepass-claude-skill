@@ -418,13 +418,37 @@ detect_duplicates() {
   printf '%s\n' "${pairs[@]}"
 }
 
-# Teste de credenciais (stub para Grupo 1 — Grupo 2 vai substituir com Playwright real)
-# Retorna: "valid:mock invalid:mock" (simulado)
-# Uso: test_credentials "$url" "$username" "$password"
+# Teste de credenciais via Playwright headless
+# Invoca skills/keepass/test_login.js para cada credencial
+# Retorna: "RESULTADO_A RESULTADO_B" (cada resultado é: valid|invalid|incompatible|error:msg)
+# Uso: test_credentials "$url" "$username_a" "$password_a" "$username_b" "$password_b"
 test_credentials() {
-  local url="$1" username="$2" password="$3"
-  # Stub que sempre retorna mock valid para ambos (será substituído no Grupo 2)
-  echo "mock:valid mock:valid"
+  local url="$1"
+  local username_a="$2"
+  local password_a="$3"
+  local username_b="$4"
+  local password_b="$5"
+
+  # Encontrar script test_login.js
+  local script_dir
+  script_dir=$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")
+  local test_script="$script_dir/skills/keepass/test_login.js"
+
+  if [ ! -f "$test_script" ]; then
+    echo "error:test_login.js não encontrado"
+    return 1
+  fi
+
+  # Testar credencial A
+  local result_a
+  result_a=$(node "$test_script" --url "$url" --username "$username_a" --password "$password_a" 2>&1)
+
+  # Testar credencial B
+  local result_b
+  result_b=$(node "$test_script" --url "$url" --username "$username_b" --password "$password_b" 2>&1)
+
+  # Retornar ambos os resultados separados por espaço
+  echo "$result_a $result_b"
 }
 ```
 
@@ -467,6 +491,30 @@ done
 
 # Handler para o subcomando merge
 if [ "$OP" = "merge" ]; then
+  # ── Verificações de pré-requisitos ────────────────────────────────────────
+  
+  # node instalado?
+  if ! command -v node &>/dev/null; then
+    echo "❌ Node.js não encontrado."
+    echo "   Instale em: https://nodejs.org"
+    exit 1
+  fi
+
+  # Playwright instalado?
+  if ! node -e "require('@playwright/test')" 2>/dev/null; then
+    echo "❌ Playwright não encontrado."
+    echo "   Instale com: npm install -g @playwright/test"
+    exit 1
+  fi
+
+  # test_login.js existe?
+  local test_script
+  test_script=$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")/skills/keepass/test_login.js
+  if [ ! -f "$test_script" ]; then
+    echo "❌ skills/keepass/test_login.js não encontrado."
+    exit 1
+  fi
+
   if [ -n "$DB_FILTER" ]; then
     db_info=$(get_db_info "$DB_FILTER") || exit 1
     alias="$DB_FILTER"
@@ -505,7 +553,19 @@ if [ "$OP" = "merge" ]; then
       echo ""
     done
     
+    # Aviso de risco obrigatório
+    echo "⚠️  AVISO: Testar credenciais automaticamente pode disparar bloqueios de conta"
+    echo "   ou captchas. Prosseguir com o teste para o par 1 de ${#pairs[@]}? [s/N]"
+    echo ""
+    read -p "Confirma: " confirm_risk
+    
+    if [ "$confirm_risk" != "s" ] && [ "$confirm_risk" != "S" ]; then
+      echo "❌ Operação cancelada pelo usuário."
+      exit 0
+    fi
+    
     # Prompt interativo para seleção de pares
+    echo ""
     echo "Selecione quais pares processar:"
     echo "  • Digite números separados por vírgula (ex: 1,3)"
     echo "  • Digite 'todos' para processar todos"
@@ -673,7 +733,9 @@ Fluxo:
 /keepass merge --db pessoal --threshold 80
 ```
 
-⚠️ **Grupos 2 e 3:** Teste de credenciais (Playwright) e merge real (edit + rm) são implementados em fases posteriores.
+**Dependências do `merge`:**
+- ✅ **Group 2:** Teste de credenciais via Playwright (implementado)
+- ⏳ **Group 3:** Merge guiado campo a campo e escrita no banco (futura)
 
 ---
 
@@ -700,6 +762,12 @@ keepassxc=$(find_keepassxc_cli); [ -n "$keepassxc" ] && echo "✓ $keepassxc" ||
 
 # KeePassXC desktop aberto? (deve estar fechado para writes)
 pgrep -x KeePassXC && echo "⚠️ Aberto" || echo "✓ Fechado"
+
+# Node.js instalado? (necessário para merge)
+command -v node && echo "✓ $(node -v)" || echo "✗ https://nodejs.org"
+
+# Playwright instalado? (necessário para merge)
+node -e "require('@playwright/test')" 2>/dev/null && echo "✓" || echo "✗ npm install -g @playwright/test"
 
 # JSON válido?
 jq . ~/.claude/keepass-config.json
