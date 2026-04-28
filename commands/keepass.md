@@ -43,6 +43,7 @@ Execute operações com: `/keepass <operação> [argumentos] [--db <alias>]`
 | `edit "<grupo/entrada>" [--db <alias>]` | Editar entrada existente |
 | `rm "<grupo/entrada>" [--db <alias>]` | Mover entrada para Lixeira — pede confirmação |
 | `totp "<grupo/entrada>" [--db <alias>]` | Gerar código TOTP (2FA) atual da entrada |
+| `merge [--db <alias>] [--threshold <0-100>]` | Detectar e mesclar entradas duplicadas (threshold padrão: 70) |
 | `generate` | Gerar senha aleatória (sem salvar) |
 | `db-info [--db <alias>]` | Informações do banco |
 | `list-dbs` | Listar todas as databases configuradas |
@@ -238,9 +239,307 @@ run_on_db() {
 }
 ```
 
-### Passo 3: Lógica principal
+### Passo 2b: Funções auxiliares para merge
 
 ```bash
+# Extrai a URL de uma entrada via show --all
+# Uso: extract_url_from_entry "$db_info" "Grupo/Entrada"
+extract_url_from_entry() {
+  local db_info="$1"
+  local entry_path="$2"
+  local path keychain_service keychain_account keyfile pass result
+
+  path=$(echo "$db_info" | jq -r '.path')
+  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
+  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
+  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+
+  pass=$(get_password "$keychain_service" "$keychain_account")
+  if [ -z "$pass" ]; then
+    return 1
+  fi
+
+  if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" show -q -s --all -k "$keyfile" "$path" "$entry_path" 2>&1)
+  else
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" show -q -s --all "$path" "$entry_path" 2>&1)
+  fi
+
+  # Procura por "URL: <url>" na saída
+  echo "$result" | grep "^URL:" | sed 's/^URL:[[:space:]]*//'
+}
+
+# Extrai o domínio base de uma URL
+# Uso: get_domain "https://accounts.google.com/login"  → google.com
+get_domain() {
+  local url="$1"
+  local domain
+
+  # Remove protocolo
+  domain="${url#*://}"
+  # Remove path
+  domain="${domain%%/*}"
+  # Remove porta
+  domain="${domain%%:*}"
+  # Remove subdomínio (leave apenas última 2 partes: domain.tld)
+  domain=$(echo "$domain" | awk -F. '{
+    n=NF
+    if (n >= 2) {
+      print $(n-1)"."$n
+    } else {
+      print $0
+    }
+  }')
+
+  echo "$domain"
+}
+
+# Calcula score fuzzy entre dois títulos (0-100)
+# Baseado em tokens (palavras) em comum
+# Usa overlap: (2 * interseção) / (token_a + token_b)
+# Uso: fuzzy_match_score "Google" "Google Account"  → 70+
+fuzzy_match_score() {
+  local title_a="$1"
+  local title_b="$2"
+  local -a tokens_a tokens_b
+  local i j count_common score
+
+  # Converter para lowercase e tokenizar por espaço e hífen
+  title_a=$(echo "$title_a" | tr '[:upper:]' '[:lower:]')
+  title_b=$(echo "$title_b" | tr '[:upper:]' '[:lower:]')
+
+  # Substituir hífens por espaços e tokenizar
+  title_a=$(echo "$title_a" | tr '-' ' ')
+  title_b=$(echo "$title_b" | tr '-' ' ')
+
+  # Split em arrays de tokens
+  mapfile -t tokens_a < <(echo "$title_a" | tr ' ' '\n' | grep -v '^$')
+  mapfile -t tokens_b < <(echo "$title_b" | tr ' ' '\n' | grep -v '^$')
+
+  # Contar interseção
+  count_common=0
+  for tok_a in "${tokens_a[@]}"; do
+    for tok_b in "${tokens_b[@]}"; do
+      [ "$tok_a" = "$tok_b" ] && ((count_common++)) && break
+    done
+  done
+
+  # Score: (2 * interseção) / (len_a + len_b)
+  # Isso dá peso maior para sobreposição
+  local total=$((${#tokens_a[@]} + ${#tokens_b[@]}))
+
+  if [ "$total" -eq 0 ]; then
+    echo 0
+  else
+    score=$((2 * count_common * 100 / total))
+    echo "$score"
+  fi
+}
+
+# Detecta entradas duplicadas no banco baseado em domínio de URL + fuzzy match de título
+# Retorna pares no formato: "ENTRADA_A|||ENTRADA_B|||SCORE" (uma linha por par)
+# Uso: detect_duplicates "$db_info" 70
+detect_duplicates() {
+  local db_info="$1"
+  local threshold="${2:-70}"
+  local path keychain_service keychain_account keyfile pass all_entries
+  local -A entries_by_domain domain prev_entry prev_title prev_url
+
+  path=$(echo "$db_info" | jq -r '.path')
+  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
+  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
+  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+
+  pass=$(get_password "$keychain_service" "$keychain_account")
+  if [ -z "$pass" ]; then
+    return 1
+  fi
+
+  # Listar todas as entradas
+  if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
+    all_entries=$(printf '%s\n' "$pass" | "$KEEPASSXC" ls -q -R -f -k "$keyfile" "$path" 2>&1)
+  else
+    all_entries=$(printf '%s\n' "$pass" | "$KEEPASSXC" ls -q -R -f "$path" 2>&1)
+  fi
+
+  # Para cada entrada, extrair URL e título
+  local -a entries array_entries
+  while IFS= read -r entry_path; do
+    [ -z "$entry_path" ] && continue
+    # Ignorar Recycle Bin
+    [[ "$entry_path" =~ ^Recycle\ Bin ]] && continue
+
+    # Extrair URL e título (título é o último componente do path)
+    local url title domain
+
+    url=$(extract_url_from_entry "$db_info" "$entry_path")
+    title=$(basename "$entry_path")
+
+    # Se não tem URL, ignorar
+    [ -z "$url" ] && continue
+
+    domain=$(get_domain "$url")
+    [ -z "$domain" ] && continue
+
+    # Agrupar por domínio
+    if [ -z "${entries_by_domain[$domain]}" ]; then
+      entries_by_domain[$domain]="$entry_path|||$title|||$url"
+    else
+      entries_by_domain[$domain]+=$'\n'"$entry_path|||$title|||$url"
+    fi
+  done <<< "$all_entries"
+
+  # Para cada domínio com múltiplas entradas, comparar pares
+  local -a pairs
+  for domain in "${!entries_by_domain[@]}"; do
+    local entries_list="${entries_by_domain[$domain]}"
+    local -a entries_array
+    mapfile -t entries_array < <(echo "$entries_list")
+
+    # Comparar todos os pares no grupo
+    for ((i = 0; i < ${#entries_array[@]}; i++)); do
+      for ((j = i + 1; j < ${#entries_array[@]}; j++)); do
+        IFS='|||' read -r path_a title_a url_a <<< "${entries_array[$i]}"
+        IFS='|||' read -r path_b title_b url_b <<< "${entries_array[$j]}"
+
+        # Calcular score fuzzy
+        local score
+        score=$(fuzzy_match_score "$title_a" "$title_b")
+
+        # Se score >= threshold, é um par candidato
+        if [ "$score" -ge "$threshold" ]; then
+          pairs+=("$path_a|||$title_a|||$url_a|||$path_b|||$title_b|||$url_b|||$score")
+        fi
+      done
+    done
+  done
+
+  # Exibir pares encontrados
+  printf '%s\n' "${pairs[@]}"
+}
+
+# Teste de credenciais (stub para Grupo 1 — Grupo 2 vai substituir com Playwright real)
+# Retorna: "valid:mock invalid:mock" (simulado)
+# Uso: test_credentials "$url" "$username" "$password"
+test_credentials() {
+  local url="$1" username="$2" password="$3"
+  # Stub que sempre retorna mock valid para ambos (será substituído no Grupo 2)
+  echo "mock:valid mock:valid"
+}
+```
+
+### Passo 3: Parser de argumentos e lógica principal
+
+```bash
+# Parser de argumentos
+OP=""
+ARGS=""
+DB_FILTER=""
+THRESHOLD="70"
+
+# Iterar sobre argumentos
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --db)
+      shift
+      DB_FILTER="$1"
+      shift
+      ;;
+    --threshold)
+      shift
+      THRESHOLD="$1"
+      shift
+      ;;
+    merge)
+      OP="merge"
+      shift
+      ;;
+    *)
+      if [ -z "$OP" ]; then
+        OP="$1"
+      else
+        ARGS="$ARGS $1"
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Handler para o subcomando merge
+if [ "$OP" = "merge" ]; then
+  if [ -n "$DB_FILTER" ]; then
+    db_info=$(get_db_info "$DB_FILTER") || exit 1
+    alias="$DB_FILTER"
+    
+    echo "🔍 Procurando entradas duplicadas no banco '$alias' (threshold: $THRESHOLD)..."
+    pairs_output=$(detect_duplicates "$db_info" "$THRESHOLD")
+    
+    if [ -z "$pairs_output" ]; then
+      echo "✅ Nenhum par de entradas duplicadas encontrado com threshold $THRESHOLD."
+      exit 0
+    fi
+    
+    # Exibir pares encontrados
+    declare -a pairs
+    mapfile -t pairs < <(echo "$pairs_output")
+    
+    echo ""
+    echo "📌 Pares de entradas candidatas encontrados:"
+    echo ""
+    
+    for i in "${!pairs[@]}"; do
+      pair_num=$((i + 1))
+      IFS='|||' read -r path_a title_a url_a path_b title_b url_b score <<< "${pairs[$i]}"
+      
+      # Extrair username de cada entrada (stub — Grupo 3 vai melhorar)
+      username_a="(username)"
+      username_b="(username)"
+      
+      echo "  [$pair_num] — Score: $score"
+      echo "      A: $title_a"
+      echo "         URL: $url_a"
+      echo "         User: $username_a"
+      echo "      B: $title_b"
+      echo "         URL: $url_b"
+      echo "         User: $username_b"
+      echo ""
+    done
+    
+    # Prompt interativo para seleção de pares
+    echo "Selecione quais pares processar:"
+    echo "  • Digite números separados por vírgula (ex: 1,3)"
+    echo "  • Digite 'todos' para processar todos"
+    echo "  • Digite 'nenhum' ou deixe em branco para cancelar"
+    echo ""
+    read -p "Pares a processar: " selection
+    
+    selection="${selection// /}"  # Remove espaços
+    
+    if [ "$selection" = "nenhum" ] || [ -z "$selection" ]; then
+      echo "❌ Operação cancelada."
+      exit 0
+    fi
+    
+    if [ "$selection" = "todos" ]; then
+      selection=$(seq -s, 1 "${#pairs[@]}")
+    fi
+    
+    echo ""
+    echo "ℹ️  Próximas etapas (Grupo 2):"
+    echo "  1. Testar credenciais de cada par (Playwright)"
+    echo "  2. Resolver conflitos campo a campo"
+    echo "  3. Confirmar merge antes de gravar no banco"
+    echo ""
+    echo "📍 Você selecionou: $selection"
+    
+  else
+    echo "❌ Operação 'merge' requer --db <alias>"
+    exit 1
+  fi
+  exit 0
+fi
+
+# Para outras operações: padrão original
 # Se --db especificado: operar apenas naquele banco
 # Se não: iterar sobre todos os bancos e agregar resultados
 
@@ -352,6 +651,29 @@ jq -r '.databases[] | "[\(.alias)] — \(.path)"' "$CONFIG"
 ```bash
 printf '%s\n' "$pass" | "$KEEPASSXC" db-info -q "$path"
 ```
+
+### `merge [--db <alias>] [--threshold <0-100>]`
+
+Detecta e lista entradas duplicadas baseado em:
+- **Domínio base da URL** (ex: `google.com` para `https://accounts.google.com/login`)
+- **Fuzzy match de título** com threshold configurável (padrão: 70)
+
+Fluxo:
+1. Lista todas as entradas do banco
+2. Agrupa por domínio de URL
+3. Compara títulos dentro de cada grupo com fuzzy match
+4. Exibe pares com score ≥ threshold
+5. Pede confirmação do usuário antes de processar
+
+```bash
+# Detectar duplicatas em um banco com threshold padrão (70)
+/keepass merge --db pessoal
+
+# Usar threshold customizado
+/keepass merge --db pessoal --threshold 80
+```
+
+⚠️ **Grupos 2 e 3:** Teste de credenciais (Playwright) e merge real (edit + rm) são implementados em fases posteriores.
 
 ---
 

@@ -188,8 +188,23 @@ Claude:
 /keepass show "Grupo/Entrada"       # exibe detalhes (senha visível) — usar caminho do search
 /keepass list --db trabalho         # lista entradas de um banco específico
 /keepass add "Dev/nova-api" --db trabalho
+/keepass merge --db pessoal         # detectar entradas duplicadas
 /keepass list-dbs                   # mostra todos os bancos configurados
 ```
+
+## Operações de Merge
+
+### Detectar duplicatas
+
+```
+/keepass merge --db pessoal --threshold 70
+```
+
+Detecta e lista entradas duplicadas baseado em:
+- URL (domínio base)
+- Título (fuzzy match com threshold configurável)
+
+Exibe pares encontrados e pede confirmação antes de processar.
 
 ### Primeiro uso (sem configuração)
 
