@@ -450,6 +450,368 @@ test_credentials() {
   # Retornar ambos os resultados separados por espaço
   echo "$result_a $result_b"
 }
+
+# Extrai o username de uma entrada via show --all
+# Uso: extract_username_from_entry "$db_info" "Grupo/Entrada"
+extract_username_from_entry() {
+  local db_info="$1"
+  local entry_path="$2"
+  local path keychain_service keychain_account keyfile pass result
+
+  path=$(echo "$db_info" | jq -r '.path')
+  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
+  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
+  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+
+  pass=$(get_password "$keychain_service" "$keychain_account")
+  if [ -z "$pass" ]; then
+    return 1
+  fi
+
+  if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" show -q -s --all -k "$keyfile" "$path" "$entry_path" 2>&1)
+  else
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" show -q -s --all "$path" "$entry_path" 2>&1)
+  fi
+
+  # Procura por "UserName: <username>" na saída
+  echo "$result" | grep "^UserName:" | sed 's/^UserName:[[:space:]]*//'
+}
+
+# Extrai a senha de uma entrada via show --all
+# Uso: extract_password_from_entry "$db_info" "Grupo/Entrada"
+extract_password_from_entry() {
+  local db_info="$1"
+  local entry_path="$2"
+  local path keychain_service keychain_account keyfile pass result
+
+  path=$(echo "$db_info" | jq -r '.path')
+  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
+  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
+  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+
+  pass=$(get_password "$keychain_service" "$keychain_account")
+  if [ -z "$pass" ]; then
+    return 1
+  fi
+
+  if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" show -q -s --all -k "$keyfile" "$path" "$entry_path" 2>&1)
+  else
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" show -q -s --all "$path" "$entry_path" 2>&1)
+  fi
+
+  # Procura por "Password: <password>" na saída
+  echo "$result" | grep "^Password:" | sed 's/^Password:[[:space:]]*//'
+}
+
+# Extrai as notas de uma entrada via show --all
+# Uso: extract_notes_from_entry "$db_info" "Grupo/Entrada"
+extract_notes_from_entry() {
+  local db_info="$1"
+  local entry_path="$2"
+  local path keychain_service keychain_account keyfile pass result in_notes
+
+  path=$(echo "$db_info" | jq -r '.path')
+  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
+  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
+  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+
+  pass=$(get_password "$keychain_service" "$keychain_account")
+  if [ -z "$pass" ]; then
+    return 1
+  fi
+
+  if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" show -q -s --all -k "$keyfile" "$path" "$entry_path" 2>&1)
+  else
+    result=$(printf '%s\n' "$pass" | "$KEEPASSXC" show -q -s --all "$path" "$entry_path" 2>&1)
+  fi
+
+  # Notas começam após a linha "Notes:" e podem ser multilinhas
+  # Pega tudo até o final ou até a próxima chave
+  echo "$result" | sed -n '/^Notes:/,$p' | sed '1s/^Notes:[[:space:]]*//'
+}
+
+# Exibe duas entradas lado a lado com resultado do teste
+# Uso: show_side_by_side "$db_info" "path_a" "path_b" "result_a" "result_b"
+# result_a/result_b são: valid|invalid|incompatible
+show_side_by_side() {
+  local db_info="$1"
+  local path_a="$2"
+  local path_b="$3"
+  local result_a="$4"
+  local result_b="$5"
+
+  local title_a title_b username_a username_b password_a password_b url_a url_b notes_a notes_b
+
+  # Extrair campos de A
+  title_a=$(basename "$path_a")
+  username_a=$(extract_username_from_entry "$db_info" "$path_a") || username_a=""
+  password_a=$(extract_password_from_entry "$db_info" "$path_a") || password_a=""
+  url_a=$(extract_url_from_entry "$db_info" "$path_a") || url_a=""
+  notes_a=$(extract_notes_from_entry "$db_info" "$path_a") || notes_a=""
+
+  # Extrair campos de B
+  title_b=$(basename "$path_b")
+  username_b=$(extract_username_from_entry "$db_info" "$path_b") || username_b=""
+  password_b=$(extract_password_from_entry "$db_info" "$path_b") || password_b=""
+  url_b=$(extract_url_from_entry "$db_info" "$path_b") || url_b=""
+  notes_b=$(extract_notes_from_entry "$db_info" "$path_b") || notes_b=""
+
+  # Indicadores de status
+  local status_a status_b
+  case "$result_a" in
+    valid) status_a="✅ válida" ;;
+    invalid) status_a="❌ inválida" ;;
+    incompatible) status_a="⚠️  incompatível" ;;
+    *) status_a="❓ desconhecido" ;;
+  esac
+
+  case "$result_b" in
+    valid) status_b="✅ válida" ;;
+    invalid) status_b="❌ inválida" ;;
+    incompatible) status_b="⚠️  incompatível" ;;
+    *) status_b="❓ desconhecido" ;;
+  esac
+
+  # Exibir lado a lado
+  echo ""
+  echo "════════════════════════════════════════════════════════════════"
+  echo "Comparação das entradas:"
+  echo "════════════════════════════════════════════════════════════════"
+  echo ""
+
+  # Helper para comparar campos
+  local -a field_names field_a field_b same
+  field_names=("Title" "UserName" "URL" "Notes")
+  field_a=("$title_a" "$username_a" "$url_a" "$notes_a")
+  field_b=("$title_b" "$username_b" "$url_b" "$notes_b")
+
+  for ((i = 0; i < ${#field_names[@]}; i++)); do
+    local field_name="${field_names[$i]}"
+    local val_a="${field_a[$i]}"
+    local val_b="${field_b[$i]}"
+    local indicator
+
+    if [ "$val_a" = "$val_b" ]; then
+      indicator="✅ igual"
+    else
+      indicator="⚠️  conflito"
+    fi
+
+    printf "%-12s %s\n" "$field_name" "$indicator"
+    printf "  A: %s\n" "$val_a"
+    printf "  B: %s\n" "$val_b"
+    echo ""
+  done
+
+  echo "Resultado do teste de credencial:"
+  printf "  A: %s\n" "$status_a"
+  printf "  B: %s\n" "$status_b"
+  echo ""
+  echo "════════════════════════════════════════════════════════════════"
+  echo ""
+}
+
+# Resolve a entrada vencedora baseado nos resultados dos testes
+# Retorna "A" ou "B" (ou vazio se não conseguir resolver automaticamente)
+# Uso: resolve_winner "$result_a" "$result_b"
+resolve_winner() {
+  local result_a="$1"
+  local result_b="$2"
+
+  # Ambas válidas → usuário escolhe
+  if [ "$result_a" = "valid" ] && [ "$result_b" = "valid" ]; then
+    return 0  # Indica que precisa de escolha do usuário
+  fi
+
+  # Apenas A válida
+  if [ "$result_a" = "valid" ] && [ "$result_b" != "valid" ]; then
+    echo "A"
+    return 0
+  fi
+
+  # Apenas B válida
+  if [ "$result_b" = "valid" ] && [ "$result_a" != "valid" ]; then
+    echo "B"
+    return 0
+  fi
+
+  # Nenhuma válida
+  return 1
+}
+
+# Resolve um conflito de campo pedindo ao usuário
+# Uso: resolve_field_conflict "Notes" "valor_a" "valor_b"
+# Retorna o valor escolhido ou digitado pelo usuário
+resolve_field_conflict() {
+  local field="$1"
+  local val_a="$2"
+  local val_b="$3"
+
+  echo "Campo \"$field\" — conflito:"
+  echo "  A: $val_a"
+  echo "  B: $val_b"
+  read -p "Usar valor de: [A/B/digitar novo valor] " choice
+
+  case "$choice" in
+    A|a) echo "$val_a" ;;
+    B|b) echo "$val_b" ;;
+    *)   echo "$choice" ;;  # Usuário digitou novo valor
+  esac
+}
+
+# Mescla duas entradas e atualiza a vencedora no banco
+# Retorna 0 se bem-sucedido, 1 se cancelado ou erro
+# Uso: merge_entries "$db_info" "$path_a" "$path_b" "A"
+merge_entries() {
+  local db_info="$1"
+  local path_a="$2"
+  local path_b="$3"
+  local winner="$4"
+
+  local path_winner path_loser
+  if [ "$winner" = "A" ]; then
+    path_winner="$path_a"
+    path_loser="$path_b"
+  else
+    path_winner="$path_b"
+    path_loser="$path_a"
+  fi
+
+  local title_winner username_winner password_winner url_winner notes_winner
+  local title_loser username_loser password_loser url_loser notes_loser
+
+  # Extrair campos da vencedora
+  title_winner=$(basename "$path_winner")
+  username_winner=$(extract_username_from_entry "$db_info" "$path_winner") || username_winner=""
+  password_winner=$(extract_password_from_entry "$db_info" "$path_winner") || password_winner=""
+  url_winner=$(extract_url_from_entry "$db_info" "$path_winner") || url_winner=""
+  notes_winner=$(extract_notes_from_entry "$db_info" "$path_winner") || notes_winner=""
+
+  # Extrair campos da perdedora
+  title_loser=$(basename "$path_loser")
+  username_loser=$(extract_username_from_entry "$db_info" "$path_loser") || username_loser=""
+  password_loser=$(extract_password_from_entry "$db_info" "$path_loser") || password_loser=""
+  url_loser=$(extract_url_from_entry "$db_info" "$path_loser") || url_loser=""
+  notes_loser=$(extract_notes_from_entry "$db_info" "$path_loser") || notes_loser=""
+
+  # Resolver cada conflito
+  local final_title final_username final_password final_url final_notes
+
+  # Title
+  if [ "$title_winner" = "$title_loser" ]; then
+    final_title="$title_winner"
+  else
+    final_title=$(resolve_field_conflict "Title" "$title_winner" "$title_loser")
+  fi
+
+  # UserName
+  if [ "$username_winner" = "$username_loser" ]; then
+    final_username="$username_winner"
+  else
+    final_username=$(resolve_field_conflict "UserName" "$username_winner" "$username_loser")
+  fi
+
+  # Password
+  if [ "$password_winner" = "$password_loser" ]; then
+    final_password="$password_winner"
+  else
+    final_password=$(resolve_field_conflict "Password" "$password_winner" "$password_loser")
+  fi
+
+  # URL
+  if [ "$url_winner" = "$url_loser" ]; then
+    final_url="$url_winner"
+  else
+    final_url=$(resolve_field_conflict "URL" "$url_winner" "$url_loser")
+  fi
+
+  # Notes
+  if [ "$notes_winner" = "$notes_loser" ]; then
+    final_notes="$notes_winner"
+  else
+    final_notes=$(resolve_field_conflict "Notes" "$notes_winner" "$notes_loser")
+  fi
+
+  # Exibir resumo e pedir confirmação
+  echo ""
+  echo "════════════════════════════════════════════════════════════════"
+  echo "Resumo do merge:"
+  echo "════════════════════════════════════════════════════════════════"
+  echo "  Vencedora: $path_winner"
+  echo "  Perdedora: $path_loser → Lixeira"
+  echo ""
+  echo "Valores finais:"
+  echo "  Title: $final_title"
+  echo "  UserName: $final_username"
+  echo "  URL: $final_url"
+  echo "  Notes: $final_notes"
+  echo ""
+  read -p "Confirma merge? [s/N] " confirm
+
+  if [ "$confirm" != "s" ] && [ "$confirm" != "S" ]; then
+    echo "❌ Merge cancelado pelo usuário."
+    return 1
+  fi
+
+  # Atualizar a vencedora
+  local alias path keychain_service keychain_account keyfile pass edit_args
+  alias=$(echo "$db_info" | jq -r '.alias')
+  path=$(echo "$db_info" | jq -r '.path')
+  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
+  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
+  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+
+  # Verificar se KeePassXC está fechado
+  if check_desktop_running; then
+    echo "❌ [$alias] KeePassXC desktop está aberto."
+    echo "   Feche o app antes de gravar as mudanças."
+    return 1
+  fi
+
+  pass=$(get_password "$keychain_service" "$keychain_account")
+  if [ -z "$pass" ]; then
+    echo "❌ [$alias] Senha não encontrada no Keychain."
+    return 1
+  fi
+
+  # Construir comando edit — usar a path exata da vencedora
+  # keepassxc-cli edit -q -u <username> --url <url> -p <path>
+  # A senha é passada via stdin
+  echo "Atualizando entrada vencedora..."
+  local edit_result edit_exit
+  if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
+    edit_result=$(printf '%s\n' "$pass" | "$KEEPASSXC" edit -q -u "$final_username" --url "$final_url" -k "$keyfile" "$path" "$path_winner" 2>&1)
+  else
+    edit_result=$(printf '%s\n' "$pass" | "$KEEPASSXC" edit -q -u "$final_username" --url "$final_url" "$path" "$path_winner" 2>&1)
+  fi
+  edit_exit=$?
+
+  if [ $edit_exit -ne 0 ]; then
+    echo "❌ [$alias] Erro ao atualizar entrada vencedora: $edit_result"
+    return 1
+  fi
+
+  # Remover a perdedora
+  echo "Movendo entrada perdedora para Lixeira..."
+  local rm_result rm_exit
+  if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
+    rm_result=$(printf '%s\n' "$pass" | "$KEEPASSXC" rm -q -k "$keyfile" "$path" "$path_loser" 2>&1)
+  else
+    rm_result=$(printf '%s\n' "$pass" | "$KEEPASSXC" rm -q "$path" "$path_loser" 2>&1)
+  fi
+  rm_exit=$?
+
+  if [ $rm_exit -ne 0 ]; then
+    echo "❌ [$alias] Erro ao remover entrada perdedora: $rm_result"
+    return 1
+  fi
+
+  echo "✅ Merge bem-sucedido!"
+  return 0
+}
 ```
 
 ### Passo 3: Parser de argumentos e lógica principal
@@ -584,13 +946,123 @@ if [ "$OP" = "merge" ]; then
       selection=$(seq -s, 1 "${#pairs[@]}")
     fi
     
+    # Processar cada par selecionado
     echo ""
-    echo "ℹ️  Próximas etapas (Grupo 2):"
-    echo "  1. Testar credenciais de cada par (Playwright)"
-    echo "  2. Resolver conflitos campo a campo"
-    echo "  3. Confirmar merge antes de gravar no banco"
+    echo "🔄 Iniciando fluxo de merge..."
     echo ""
-    echo "📍 Você selecionou: $selection"
+
+    # Parse selection para array de índices (1-based)
+    local -a selected_indices
+    if [[ "$selection" == *","* ]]; then
+      IFS=',' read -ra selected_indices <<< "$selection"
+    else
+      selected_indices=("$selection")
+    fi
+
+    local total_processed=0
+    local total_successful=0
+    local total_ignored=0
+    local total_moved_to_trash=0
+
+    # Processar cada par selecionado
+    for idx in "${selected_indices[@]}"; do
+      idx=$((idx - 1))  # Converter para 0-based
+      
+      if [ "$idx" -lt 0 ] || [ "$idx" -ge "${#pairs[@]}" ]; then
+        echo "⚠️  Índice inválido: $((idx + 1))"
+        continue
+      fi
+
+      ((total_processed++))
+      
+      # Extrair informações do par
+      IFS='|||' read -r path_a title_a url_a path_b title_b url_b score <<< "${pairs[$idx]}"
+      
+      echo "════════════════════════════════════════════════════════════════"
+      echo "Processando par $((idx + 1))/$((${#pairs[@]})) — Score: $score"
+      echo "════════════════════════════════════════════════════════════════"
+      echo ""
+
+      # Extrair credenciais
+      local username_a password_a username_b password_b
+      username_a=$(extract_username_from_entry "$db_info" "$path_a") || username_a=""
+      password_a=$(extract_password_from_entry "$db_info" "$path_a") || password_a=""
+      username_b=$(extract_username_from_entry "$db_info" "$path_b") || username_b=""
+      password_b=$(extract_password_from_entry "$db_info" "$path_b") || password_b=""
+
+      # Testar credenciais
+      echo "Testando credenciais em $url_a..."
+      local test_results
+      test_results=$(test_credentials "$url_a" "$username_a" "$password_a" "$username_b" "$password_b")
+      
+      local result_a result_b
+      result_a=$(echo "$test_results" | awk '{print $1}')
+      result_b=$(echo "$test_results" | awk '{print $2}')
+
+      # Exibir lado a lado
+      show_side_by_side "$db_info" "$path_a" "$path_b" "$result_a" "$result_b"
+
+      # Resolver vencedora
+      local winner auto_selection
+      auto_selection=$(resolve_winner "$result_a" "$result_b")
+      exit_code=$?
+
+      if [ $exit_code -eq 0 ] && [ -n "$auto_selection" ]; then
+        # Vencedora automática
+        winner="$auto_selection"
+        echo "✅ Entrada $winner selecionada automaticamente (credencial válida)."
+        echo ""
+      elif [ "$result_a" = "valid" ] && [ "$result_b" = "valid" ]; then
+        # Ambas válidas — usuário escolhe
+        read -p "Qual entrada manter como base? [A/B] " winner
+        if [ "$winner" != "A" ] && [ "$winner" != "B" ]; then
+          echo "❌ Escolha inválida. Par ignorado."
+          ((total_ignored++))
+          continue
+        fi
+      else
+        # Nenhuma válida
+        echo "❌ Nenhuma credencial válida — par ignorado."
+        ((total_ignored++))
+        continue
+      fi
+
+      # Executar merge
+      local merge_path_a merge_path_b
+      if [ "$winner" = "A" ]; then
+        merge_path_a="$path_a"
+        merge_path_b="$path_b"
+      else
+        merge_path_a="$path_b"
+        merge_path_b="$path_a"
+      fi
+
+      if merge_entries "$db_info" "$merge_path_a" "$merge_path_b" "A"; then
+        ((total_successful++))
+        ((total_moved_to_trash++))
+      else
+        ((total_ignored++))
+      fi
+
+      echo ""
+    done
+
+    # Relatório final
+    echo ""
+    echo "════════════════════════════════════════════════════════════════"
+    echo "=== Relatório de Merge ==="
+    echo "════════════════════════════════════════════════════════════════"
+    echo "Processados: $total_processed pares"
+    echo "Merges concluídos: $total_successful"
+    echo "Pares ignorados: $total_ignored (sem credencial válida / cancelados)"
+    echo "Entradas na Lixeira: $total_moved_to_trash"
+    echo "════════════════════════════════════════════════════════════════"
+    echo ""
+
+    if [ $total_successful -gt 0 ]; then
+      echo "✅ Merge concluído! Para visualizar as entradas movidas:"
+      echo "   /keepass list --db $alias | grep 'Recycle Bin'"
+    fi
     
   else
     echo "❌ Operação 'merge' requer --db <alias>"
