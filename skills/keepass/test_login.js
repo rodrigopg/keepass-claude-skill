@@ -154,6 +154,7 @@ function hasLogoutElement(page) {
 
 /**
  * Detecta se há mensagem de erro de senha
+ * Usa isVisible() que é síncrona em Playwright
  */
 function hasErrorMessage(page) {
   try {
@@ -170,13 +171,12 @@ function hasErrorMessage(page) {
       const elem = page.locator(selector).first();
       if (elem) {
         try {
-          const text = await elem.textContent();
-          // Se tem texto visível, é uma mensagem de erro
-          if (text && text.trim().length > 0) {
+          // Apenas verificar visibilidade (síncrono)
+          if (elem.isVisible()) {
             return true;
           }
         } catch {
-          // Ignorar erros ao ler texto
+          // Ignorar erros ao verificar visibilidade
         }
       }
     }
