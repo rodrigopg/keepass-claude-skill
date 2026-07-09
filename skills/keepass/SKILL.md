@@ -206,6 +206,14 @@ Detecta e lista entradas duplicadas baseado em:
 
 Exibe pares encontrados e pede confirmação antes de processar.
 
+### Preservar múltiplas URLs
+
+Quando as entradas duplicadas têm URLs diferentes (SSO — mesmo login em vários
+domínios), o merge oferece manter ambas: a URL da perdedora é gravada na
+vencedora como atributo `KP2A_URL`, que o KeePassXC-Browser reconhece como URL
+adicional. Requer `pykeepass` (`pip3 install --user --break-system-packages pykeepass`);
+a gravação é feita por `add_extra_url.py` nesta pasta, com senha via stdin.
+
 ### Primeiro uso (sem configuração)
 
 Se `~/.claude/keepass-config.json` não existir:

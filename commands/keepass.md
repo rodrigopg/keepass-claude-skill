@@ -721,11 +721,30 @@ merge_entries() {
     final_password=$(resolve_field_conflict "Password" "$password_winner" "$password_loser")
   fi
 
-  # URL
-  if [ "$url_winner" = "$url_loser" ]; then
+  # URL — preservar ambas quando possível (KP2A_URL na vencedora)
+  local extra_url=""
+  if [ "$url_winner" = "$url_loser" ] || [ -z "$url_loser" ]; then
     final_url="$url_winner"
+  elif [ -z "$url_winner" ]; then
+    final_url="$url_loser"
   else
-    final_url=$(resolve_field_conflict "URL" "$url_winner" "$url_loser")
+    echo ""
+    echo "URLs diferem:"
+    echo "  Vencedora: $url_winner"
+    echo "  Perdedora: $url_loser"
+    if [ "$PYKEEPASS_OK" = true ]; then
+      read -p "Manter ambas? [S/n — 'n' escolhe só uma] " keep_both
+      if [ "$keep_both" != "n" ] && [ "$keep_both" != "N" ]; then
+        final_url="$url_winner"
+        extra_url="$url_loser"
+      else
+        final_url=$(resolve_field_conflict "URL" "$url_winner" "$url_loser")
+      fi
+    else
+      echo "⚠️  pykeepass não disponível — não é possível gravar URL adicional."
+      echo "   Instale com: pip3 install --user --break-system-packages pykeepass"
+      final_url=$(resolve_field_conflict "URL" "$url_winner" "$url_loser")
+    fi
   fi
 
   # Notes
@@ -747,6 +766,7 @@ merge_entries() {
   echo "  Title: $final_title"
   echo "  UserName: $final_username"
   echo "  URL: $final_url"
+  [ -n "$extra_url" ] && echo "  URL adicional (KP2A_URL): $extra_url"
   echo "  Notes: $final_notes"
   echo ""
   read -p "Confirma merge? [s/N] " confirm
@@ -792,6 +812,27 @@ merge_entries() {
   if [ $edit_exit -ne 0 ]; then
     echo "❌ [$alias] Erro ao atualizar entrada vencedora: $edit_result"
     return 1
+  fi
+
+  # Gravar URL adicional (KP2A_URL) na vencedora via pykeepass
+  # keepassxc-cli não grava atributos customizados; o KeePassXC-Browser
+  # reconhece KP2A_URL* como URLs adicionais da entrada
+  if [ -n "$extra_url" ]; then
+    echo "Gravando URL adicional na vencedora..."
+    local helper extra_result extra_exit
+    helper="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/../skills/keepass/add_extra_url.py"
+    if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
+      extra_result=$(printf '%s\n' "$pass" | python3 "$helper" "$path" "$path_winner" "$extra_url" "$keyfile" 2>&1)
+    else
+      extra_result=$(printf '%s\n' "$pass" | python3 "$helper" "$path" "$path_winner" "$extra_url" 2>&1)
+    fi
+    extra_exit=$?
+    if [ $extra_exit -ne 0 ]; then
+      echo "⚠️  Falha ao gravar URL adicional: $extra_result"
+      echo "   Merge continua — adicione manualmente em Browser Integration > Additional URLs."
+    else
+      echo "$extra_result"
+    fi
   fi
 
   # Remover a perdedora
@@ -853,28 +894,18 @@ done
 
 # Handler para o subcomando merge
 if [ "$OP" = "merge" ]; then
-  # ── Verificações de pré-requisitos ────────────────────────────────────────
-  
-  # node instalado?
-  if ! command -v node &>/dev/null; then
-    echo "❌ Node.js não encontrado."
-    echo "   Instale em: https://nodejs.org"
-    exit 1
+  # Playwright e test_login.js são verificados apenas no momento do teste de credenciais,
+  # não na entrada do comando — detecção de duplicatas não precisa deles.
+  test_script="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/../skills/keepass/test_login.js"
+  PLAYWRIGHT_OK=false
+  if command -v node &>/dev/null && node -e "require('@playwright/test')" 2>/dev/null && [ -f "$test_script" ]; then
+    PLAYWRIGHT_OK=true
   fi
 
-  # Playwright instalado?
-  if ! node -e "require('@playwright/test')" 2>/dev/null; then
-    echo "❌ Playwright não encontrado."
-    echo "   Instale com: npm install -g @playwright/test"
-    exit 1
-  fi
-
-  # test_login.js existe?
-  local test_script
-  test_script=$(dirname "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)")/skills/keepass/test_login.js
-  if [ ! -f "$test_script" ]; then
-    echo "❌ skills/keepass/test_login.js não encontrado."
-    exit 1
+  # pykeepass habilita preservar múltiplas URLs no merge (atributos KP2A_URL)
+  PYKEEPASS_OK=false
+  if command -v python3 &>/dev/null && python3 -c "import pykeepass" 2>/dev/null; then
+    PYKEEPASS_OK=true
   fi
 
   if [ -n "$DB_FILTER" ]; then
@@ -990,14 +1021,19 @@ if [ "$OP" = "merge" ]; then
       username_b=$(extract_username_from_entry "$db_info" "$path_b") || username_b=""
       password_b=$(extract_password_from_entry "$db_info" "$path_b") || password_b=""
 
-      # Testar credenciais
-      echo "Testando credenciais em $url_a..."
-      local test_results
-      test_results=$(test_credentials "$url_a" "$username_a" "$password_a" "$username_b" "$password_b")
-      
+      # Testar credenciais (apenas se Playwright disponível)
       local result_a result_b
-      result_a=$(echo "$test_results" | awk '{print $1}')
-      result_b=$(echo "$test_results" | awk '{print $2}')
+      if [ "$PLAYWRIGHT_OK" = true ]; then
+        echo "Testando credenciais em $url_a..."
+        local test_results
+        test_results=$(test_credentials "$url_a" "$username_a" "$password_a" "$username_b" "$password_b")
+        result_a=$(echo "$test_results" | awk '{print $1}')
+        result_b=$(echo "$test_results" | awk '{print $2}')
+      else
+        echo "⚠️  Playwright não disponível — teste automático desabilitado."
+        result_a="incompatible"
+        result_b="incompatible"
+      fi
 
       # Exibir lado a lado
       show_side_by_side "$db_info" "$path_a" "$path_b" "$result_a" "$result_b"
@@ -1008,12 +1044,10 @@ if [ "$OP" = "merge" ]; then
       exit_code=$?
 
       if [ $exit_code -eq 0 ] && [ -n "$auto_selection" ]; then
-        # Vencedora automática
         winner="$auto_selection"
         echo "✅ Entrada $winner selecionada automaticamente (credencial válida)."
         echo ""
       elif [ "$result_a" = "valid" ] && [ "$result_b" = "valid" ]; then
-        # Ambas válidas — usuário escolhe
         read -p "Qual entrada manter como base? [A/B] " winner
         if [ "$winner" != "A" ] && [ "$winner" != "B" ]; then
           echo "❌ Escolha inválida. Par ignorado."
@@ -1021,10 +1055,19 @@ if [ "$OP" = "merge" ]; then
           continue
         fi
       else
-        # Nenhuma válida
-        echo "❌ Nenhuma credencial válida — par ignorado."
-        ((total_ignored++))
-        continue
+        # Sem teste automático ou nenhuma válida — escolha manual
+        echo "Escolha manual: qual entrada manter como base?"
+        read -p "[A/B/pular] " winner
+        if [ "$winner" = "pular" ] || [ -z "$winner" ]; then
+          echo "⏭️  Par ignorado."
+          ((total_ignored++))
+          continue
+        fi
+        if [ "$winner" != "A" ] && [ "$winner" != "B" ]; then
+          echo "❌ Escolha inválida. Par ignorado."
+          ((total_ignored++))
+          continue
+        fi
       fi
 
       # Executar merge
@@ -1205,9 +1248,17 @@ Fluxo:
 /keepass merge --db pessoal --threshold 80
 ```
 
-**Dependências do `merge`:**
-- ✅ **Group 2:** Teste de credenciais via Playwright (implementado)
-- ⏳ **Group 3:** Merge guiado campo a campo e escrita no banco (futura)
+**Preservação de múltiplas URLs:** quando as duas entradas têm URLs diferentes
+(caso típico de SSO — ex.: TOTVS Fluig Identity com dezenas de URLs para o mesmo
+login), o merge oferece manter ambas: a URL da vencedora fica como principal e a
+da perdedora é gravada como atributo `KP2A_URL` — reconhecido pelo
+KeePassXC-Browser como URL adicional (mesmo campo de Browser Integration >
+Additional URLs da GUI). A gravação usa `skills/keepass/add_extra_url.py`
+(pykeepass), pois o keepassxc-cli não grava atributos customizados.
+
+**Dependências do `merge`** (ambas opcionais — sem elas o fluxo degrada para escolha manual):
+- **Playwright** (`npm install -g @playwright/test`) — teste automático de credenciais
+- **pykeepass** (`pip3 install --user --break-system-packages pykeepass`) — preservar múltiplas URLs
 
 ---
 
@@ -1240,6 +1291,9 @@ command -v node && echo "✓ $(node -v)" || echo "✗ https://nodejs.org"
 
 # Playwright instalado? (necessário para merge)
 node -e "require('@playwright/test')" 2>/dev/null && echo "✓" || echo "✗ npm install -g @playwright/test"
+
+# pykeepass instalado? (opcional — múltiplas URLs no merge)
+python3 -c "import pykeepass" 2>/dev/null && echo "✓" || echo "✗ pip3 install --user --break-system-packages pykeepass"
 
 # JSON válido?
 jq . ~/.claude/keepass-config.json
