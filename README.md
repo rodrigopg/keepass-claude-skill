@@ -15,6 +15,13 @@ Uma integração completa que permite:
 - 🗣️ **Linguagem natural** — pergunta em português e a skill auto-carrega
 - 🔐 **Seguro** — senhas armazenadas no macOS Keychain, nunca na CLI
 
+## 📦 Instalação
+
+```
+/plugin marketplace add rodrigopg/claude-plugins
+/plugin install keepass@rodrigopg
+```
+
 ## ⚡ Quick Start
 
 ```bash

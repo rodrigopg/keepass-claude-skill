@@ -1,10 +1,20 @@
 {
   "name": "keepass",
-  "description": "Plugin Claude Code para gerenciamento de bancos KeePass — busca, adição, edição, remoção e merge de duplicatas (com múltiplas URLs por entrada) em múltiplos bancos via keepassxc-cli. Autenticação segura via secret store do OS (Keychain no macOS, libsecret no Linux/WSL). Wizard /keepass-setup para configuração interativa.",
-  "version": "1.1.0",
+  "description": "Manage KeePass databases from Claude Code via keepassxc-cli — search, add, edit, delete and merge duplicate entries (multiple URLs per entry) across multiple databases. Secure auth via the OS secret store (Keychain on macOS, libsecret on Linux/WSL). Interactive /keepass-setup wizard.",
+  "version": "1.1.1",
   "author": {
-    "name": "TBC - Time de Desenvolvimento"
+    "name": "Rodrigo Gonçalves",
+    "url": "https://github.com/rodrigopg"
   },
   "homepage": "https://github.com/rodrigopg/keepass-claude-skill",
-  "repository": "https://github.com/rodrigopg/keepass-claude-skill"
+  "repository": "https://github.com/rodrigopg/keepass-claude-skill",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "keepass",
+    "keepassxc",
+    "passwords",
+    "credentials",
+    "secrets"
+  ]
 }
