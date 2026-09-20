@@ -29,8 +29,9 @@ fi
 ```
 
 ```bash
-# Verificar jq
-which jq 2>/dev/null && jq --version || echo "NOT_FOUND"
+# Verificar python3 (parsing de config — sem dependência de jq)
+PY=$(command -v python3 || echo /usr/bin/python3)
+[ -x "$PY" ] && "$PY" --version || echo "NOT_FOUND"
 ```
 
 ```bash
@@ -78,7 +79,7 @@ Com base nos resultados:
   # Linux / WSL (Fedora/RHEL)
   sudo dnf install keepassxc
   ```
-- Se `jq` não encontrado: instruir `brew install jq` (macOS) ou `sudo apt install jq` / `sudo dnf install jq` (Linux/WSL) e **parar**
+- Se `python3` não encontrado: instruir instalação (macOS já traz em `/usr/bin/python3`; Linux: `sudo apt install python3`) e **parar**
 - Se configuração já existe: perguntar "Já existe um `keepass-config.json`. Deseja (1) adicionar databases à configuração existente ou (2) recriar do zero?"
 
 ---
@@ -197,7 +198,8 @@ EOF
 
 ```bash
 # Validar JSON gerado
-jq . "$HOME/.claude/keepass-config.json" && echo "✓ JSON válido"
+PY=$(command -v python3 || echo /usr/bin/python3)
+"$PY" -m json.tool "$HOME/.claude/keepass-config.json" >/dev/null && echo "✓ JSON válido"
 ```
 
 ---
@@ -245,9 +247,9 @@ KEEPASSXC=$(which keepassxc-cli 2>/dev/null || echo "/opt/homebrew/bin/keepassxc
 CONFIG="$HOME/.claude/keepass-config.json"
 
 alias="ALIAS"
-path=$(jq -r ".databases[] | select(.alias == \"$alias\") | .path" "$CONFIG")
-account=$(jq -r ".databases[] | select(.alias == \"$alias\") | .keychain_account" "$CONFIG")
-keyfile=$(jq -r ".databases[] | select(.alias == \"$alias\") | .keyfile // empty" "$CONFIG")
+PY=$(command -v python3 || echo /usr/bin/python3)
+SKILL_DIR="${SKILL_DIR:-$HOME/.claude/skills/keepass}"
+IFS='|' read -r _ path _ account keyfile < <("$PY" "$SKILL_DIR/kp_config.py" --alias "$alias")
 pass=$(security find-generic-password -s "keepassxc-cli" -a "$account" -w 2>/dev/null)
 
 if [ -n "$keyfile" ] && [ -f "$keyfile" ]; then
@@ -271,7 +273,7 @@ echo "$result"
 ```bash
 # Mostrar resumo final
 echo "=== Configuração KeePass Skill ==="
-jq -r '.databases[] | "✓ [\(.alias)] \(.description)"' "$HOME/.claude/keepass-config.json"
+"$PY" "$SKILL_DIR/kp_config.py" | awk -F'|' '{print "✓ [" $1 "] " $2}'
 echo ""
 echo "Arquivo salvo em: $HOME/.claude/keepass-config.json"
 ```

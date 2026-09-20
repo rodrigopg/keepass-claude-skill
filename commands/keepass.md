@@ -114,14 +114,14 @@ check_desktop_running() {
 
 # ── Validações ────────────────────────────────────────────────────────────────
 
-# jq instalado?
-if ! command -v jq &>/dev/null; then
-  case "$(detect_os)" in
-    macos) echo "❌ jq não encontrado. Instale com: brew install jq" ;;
-    linux) echo "❌ jq não encontrado. Instale com: sudo apt install jq" ;;
-  esac
+# python3 disponível? (parsing de config usa kp_config.py — sem dependência de jq)
+PY=$(command -v python3 || echo /usr/bin/python3)
+if [ ! -x "$PY" ]; then
+  echo "❌ python3 não encontrado."
   exit 1
 fi
+SKILL_DIR="${SKILL_DIR:-$HOME/.claude/skills/keepass}"
+KP_CONFIG="$PY $SKILL_DIR/kp_config.py"  # uso: $KP_CONFIG [--aliases|--alias X|--validate]
 
 # keepassxc-cli instalado?
 KEEPASSXC=$(find_keepassxc_cli)
@@ -146,19 +146,18 @@ fi
 ```bash
 # Listar todos os aliases disponíveis
 get_all_aliases() {
-  jq -r '.databases[].alias' "$CONFIG"
+  $KP_CONFIG --aliases
 }
 
-# Obter info de um banco pelo alias (usa --arg para evitar injeção por alias com aspas)
+# Obter info de um banco pelo alias — retorna linha "alias|path|service|account|keyfile"
 get_db_info() {
   local alias="$1"
   local info
-  info=$(jq --arg alias "$alias" '.databases[] | select(.alias == $alias)' "$CONFIG")
-  if [ -z "$info" ]; then
+  info=$($KP_CONFIG --alias "$alias") || {
     echo "❌ Alias '$alias' não encontrado. Aliases disponíveis:"
-    jq -r '.databases[] | "  • \(.alias)"' "$CONFIG"
+    $KP_CONFIG --aliases | sed 's/^/  • /'
     return 1
-  fi
+  }
   echo "$info"
 }
 ```
@@ -172,11 +171,7 @@ run_on_db() {
   local args="$3"    # argumentos adicionais (string, expandida pelo chamador)
 
   local alias path keychain_service keychain_account keyfile
-  alias=$(echo "$db_info" | jq -r '.alias')
-  path=$(echo "$db_info" | jq -r '.path')
-  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
-  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
-  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+  IFS='|' read -r alias path keychain_service keychain_account keyfile <<< "$db_info"
 
   # Para operações de ESCRITA: KeePassXC desktop deve estar fechado
   if [[ "$op" =~ ^(add|edit|rm)$ ]]; then
@@ -249,10 +244,7 @@ extract_url_from_entry() {
   local entry_path="$2"
   local path keychain_service keychain_account keyfile pass result
 
-  path=$(echo "$db_info" | jq -r '.path')
-  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
-  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
-  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+  IFS='|' read -r _ path keychain_service keychain_account keyfile <<< "$db_info"
 
   pass=$(get_password "$keychain_service" "$keychain_account")
   if [ -z "$pass" ]; then
@@ -345,10 +337,7 @@ detect_duplicates() {
   local path keychain_service keychain_account keyfile pass all_entries
   local -A entries_by_domain domain prev_entry prev_title prev_url
 
-  path=$(echo "$db_info" | jq -r '.path')
-  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
-  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
-  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+  IFS='|' read -r _ path keychain_service keychain_account keyfile <<< "$db_info"
 
   pass=$(get_password "$keychain_service" "$keychain_account")
   if [ -z "$pass" ]; then
@@ -458,10 +447,7 @@ extract_username_from_entry() {
   local entry_path="$2"
   local path keychain_service keychain_account keyfile pass result
 
-  path=$(echo "$db_info" | jq -r '.path')
-  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
-  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
-  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+  IFS='|' read -r _ path keychain_service keychain_account keyfile <<< "$db_info"
 
   pass=$(get_password "$keychain_service" "$keychain_account")
   if [ -z "$pass" ]; then
@@ -485,10 +471,7 @@ extract_password_from_entry() {
   local entry_path="$2"
   local path keychain_service keychain_account keyfile pass result
 
-  path=$(echo "$db_info" | jq -r '.path')
-  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
-  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
-  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+  IFS='|' read -r _ path keychain_service keychain_account keyfile <<< "$db_info"
 
   pass=$(get_password "$keychain_service" "$keychain_account")
   if [ -z "$pass" ]; then
@@ -512,10 +495,7 @@ extract_notes_from_entry() {
   local entry_path="$2"
   local path keychain_service keychain_account keyfile pass result in_notes
 
-  path=$(echo "$db_info" | jq -r '.path')
-  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
-  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
-  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+  IFS='|' read -r _ path keychain_service keychain_account keyfile <<< "$db_info"
 
   pass=$(get_password "$keychain_service" "$keychain_account")
   if [ -z "$pass" ]; then
@@ -778,11 +758,7 @@ merge_entries() {
 
   # Atualizar a vencedora
   local alias path keychain_service keychain_account keyfile pass edit_args
-  alias=$(echo "$db_info" | jq -r '.alias')
-  path=$(echo "$db_info" | jq -r '.path')
-  keychain_service=$(echo "$db_info" | jq -r '.keychain_service')
-  keychain_account=$(echo "$db_info" | jq -r '.keychain_account')
-  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
+  IFS='|' read -r alias path keychain_service keychain_account keyfile <<< "$db_info"
 
   # Verificar se KeePassXC está fechado
   if check_desktop_running; then
@@ -1218,7 +1194,7 @@ Compatível com keepassxc-cli v2.7.x+. O subcomando `totp` só existe na v2.8+.
 ### `list-dbs`
 
 ```bash
-jq -r '.databases[] | "[\(.alias)] — \(.path)"' "$CONFIG"
+$KP_CONFIG | awk -F'|' '{print "[" $1 "] — " $2}'
 ```
 
 ### `db-info`
@@ -1277,8 +1253,8 @@ Additional URLs da GUI). A gravação usa `skills/keepass/add_extra_url.py`
 ## Diagnóstico
 
 ```bash
-# jq instalado?
-command -v jq && echo "✓" || echo "✗ brew install jq"
+# python3 disponível? (fallback pra PATH quebrado)
+PY=$(command -v python3 || echo /usr/bin/python3); [ -x "$PY" ] && echo "✓ $PY" || echo "✗ python3 ausente"
 
 # keepassxc-cli instalado?
 keepassxc=$(find_keepassxc_cli); [ -n "$keepassxc" ] && echo "✓ $keepassxc" || echo "✗ não encontrado"
@@ -1296,7 +1272,7 @@ node -e "require('@playwright/test')" 2>/dev/null && echo "✓" || echo "✗ npm
 python3 -c "import pykeepass" 2>/dev/null && echo "✓" || echo "✗ pip3 install --user --break-system-packages pykeepass"
 
 # JSON válido?
-jq . ~/.claude/keepass-config.json
+$KP_CONFIG --validate
 
 # Keychain configurado para um banco? (macOS)
 security find-generic-password -s "keepassxc-cli" -a "KEYCHAIN_ACCOUNT" -w 2>&1 | head -c 3 | xxd

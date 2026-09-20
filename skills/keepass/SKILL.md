@@ -76,17 +76,16 @@ Se o arquivo não existir, orientar o usuário a executar `/keepass-setup`.
 
 Percorre **todas** as databases configuradas:
 
+Config é lida por `kp_config.py` (na pasta desta skill) — **sem dependência de
+`jq`**, só `python3`. O PATH da sessão pode estar quebrado; use caminhos
+absolutos de fallback para os binários do sistema:
+
 ```bash
-CONFIG="$HOME/.claude/keepass-config.json"
+SKILL_DIR="$(dirname "$0")"   # ou caminho da pasta desta skill
+PY=$(command -v python3 || echo /usr/bin/python3)
 KEEPASSXC=$(find_keepassxc_cli)
 
-for alias in $(jq -r '.databases[].alias' "$CONFIG"); do
-  db_info=$(jq --arg alias "$alias" '.databases[] | select(.alias == $alias)' "$CONFIG")
-  path=$(echo "$db_info" | jq -r '.path')
-  account=$(echo "$db_info" | jq -r '.keychain_account')
-  service=$(echo "$db_info" | jq -r '.keychain_service')
-  keyfile=$(echo "$db_info" | jq -r '.keyfile // empty')
-
+"$PY" "$SKILL_DIR/kp_config.py" | while IFS='|' read -r alias path service account keyfile; do
   # Se arquivo não existir, reportar e continuar para próximo banco
   if [ ! -f "$path" ]; then
     echo "❌ [$alias] Arquivo não encontrado: $path"
@@ -116,8 +115,8 @@ done
 Se usuário especificar `--db <alias>`:
 
 ```bash
-db_info=$(jq --arg alias "$alias" '.databases[] | select(.alias == $alias)' "$CONFIG")
-# ... processar apenas esse banco
+IFS='|' read -r alias path service account keyfile < <("$PY" "$SKILL_DIR/kp_config.py" --alias "$alias")
+# ... processar apenas esse banco (exit 1 se alias não existir)
 ```
 
 ### Fluxo obrigatório para `show`
@@ -148,7 +147,7 @@ db_info=$(jq --arg alias "$alias" '.databases[] | select(.alias == $alias)' "$CO
 | `Invalid credentials` / `Wrong key` | Senha master errada no secret store | Todos | **Parar e instruir** o usuário a corrigir manualmente |
 | Arquivo não encontrado | Nuvem não sincronizada ou caminho errado | Todos | **Parar e reportar** — não usar `find` para buscar alternativas |
 | Saída vazia | Nenhuma entrada encontrada | Todos | Normal — informar ao usuário; oferecer `search` |
-| `jq: command not found` | `jq` não instalado | Todos | macOS: `brew install jq` / Linux: `sudo apt install jq` |
+| `command not found` (jq/rm/ssh/security) | PATH da sessão quebrado | Todos | Skill não usa `jq`; para binários do sistema usar caminho absoluto (`/usr/bin/security`, `/bin/rm`, `/usr/bin/python3`) |
 | `keepassxc-cli: command not found` | App não instalado | Todos | macOS: `brew install keepassxc` / Linux: `sudo apt install keepassxc` |
 | `secret-tool: command not found` | libsecret não instalado | Linux/WSL | `sudo apt install libsecret-tools` |
 | `Cannot autolaunch D-Bus` | Sem sessão D-Bus ativa | Linux/WSL headless | Executar em sessão desktop ou exportar `DBUS_SESSION_BUS_ADDRESS` |
